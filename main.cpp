@@ -16,25 +16,82 @@
 
 int RequestsMade = 0;
 int ThreadCount = std::thread::hardware_concurrency();
-std::vector<std::string> lines;
 std::mutex mtx;
 std::string url;
+std::string bodyTemplate;
 
-bool validateArgs(int argc, char* argv[])
+struct Payload
 {
-	bool isValid = true;
+	std::string username;
+	std::string password;
 
-	if(argc < 2) isValid = false;
+	Payload(std::string _username, std::string _password)
+	{
+		this->username = _username;
+		this->password = _password;
+	};
+};
+std::vector<Payload> payloads;
 
-	return true;
+size_t WriteStringCallback(char *ptr, size_t size, size_t nmemb)
+{
+	std::string data = std::string(ptr, size * nmemb);
+	int totalSize = size * nmemb;
+	std::cout << "DATA:  " << data << std::endl;
+	return totalSize;
 }
 
-size_t WriteStringCallback(char* ptr, size_t size, size_t nmemb)
+std::string buildTime(int s)
 {
-	std::string data = std::string(ptr, size*nmemb);
-    int totalSize= size*nmemb;
-	std::cout << "DATA:  " << data << std::endl;
-    return totalSize;
+	int hours = floor((s / 60) / 60);
+	int minutes = (int)(floor(s / 60)) % 60;
+	int seconds = (int)s % 60;
+
+	std::string time = "";
+	if (hours < 10)
+		time.append("0");
+	time.append(std::to_string(hours));
+	time.append(":");
+	if (minutes < 10)
+		time.append("0");
+	time.append(std::to_string(minutes));
+	time.append(":");
+	if (seconds < 10)
+		time.append("0");
+	time.append(std::to_string(seconds));
+	return time;
+}
+
+std::string passInParameters(std::string string, Payload payload)
+{
+	std::string result = string;
+	std::size_t userPos = string.find("^USER^");
+	if (userPos != std::string::npos)
+	{
+		result = result.replace(userPos, 6, payload.username);
+	}
+
+	std::size_t passPos = result.find("^PASS^");
+	if (passPos != std::string::npos)
+	{
+		result = result.replace(passPos, 6, payload.password);
+	}
+	return result;
+}
+
+std::vector<std::string> getFileLines(std::string filePath)
+{
+	std::vector<std::string> lines;
+	std::ifstream file;
+	file.open(filePath);
+
+	std::string currentLine;
+	while (std::getline(file, currentLine))
+	{
+		lines.push_back(currentLine);
+	}
+	file.close();
+	return lines;
 }
 
 void thread_function()
@@ -48,14 +105,16 @@ void thread_function()
 	std::list<std::string> header;
 	header.push_back("Content-Type: application/json");
 	std::string cookies = "";
-	std::string body = "{\"id\": \"beep\"}";
+	std::string body = "";
 
-	while(!lines.empty()){
+	while (!payloads.empty())
+	{
 		mtx.lock();
-		std::string password = lines.back();
-		lines.pop_back();
+		Payload payload = payloads.back();
+		payloads.pop_back();
 		RequestsMade++;
 		mtx.unlock();
+		body = passInParameters(bodyTemplate, payload);
 		handle.setOpt<cURLpp::options::Url>(url);
 		handle.setOpt<cURLpp::options::HttpHeader>(header);
 		handle.setOpt<cURLpp::options::CookieList>(cookies);
@@ -67,35 +126,38 @@ void thread_function()
 	}
 }
 
-
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-	// if(!validateArgs(argc, argv)) return 1;
 	url = argv[1];
-	std::string wordlistPath = argv[2];
-	ThreadCount = std::stoi(argv[3]);
+	std::string passwordListPath = argv[2];
+	std::string usernameListPath = argv[3];
+	std::string bodyTemplate = argv[4];
+	ThreadCount = std::stoi(argv[5]);
 
-	std::ifstream wordlist;
-	wordlist.open(wordlistPath);
-	std::string line;
-	std::cout << "Reading " << wordlistPath << std::endl;
+	std::cout << "Reading " << passwordListPath << std::endl;
+	std::vector<std::string> passwords = getFileLines(passwordListPath);
 
-	while(std::getline(wordlist, line))
+	std::cout << "Reading " << usernameListPath << std::endl;
+	std::vector<std::string> usernames = getFileLines(passwordListPath);
+	while (!usernames.empty())
 	{
-		lines.push_back(line);
+		std::string username = usernames.back();
+		for (std::string password : passwords)
+		{
+			payloads.push_back(Payload(username, password));
+		}
+		usernames.pop_back();
 	}
-	wordlist.close();
-	std::random_shuffle(lines.begin(), lines.end());
+	passwords.clear();
+	usernames.clear();
+	std::cout << payloads.size() << " payloads created and shuffled." << std::endl;
 
-	std::cout << lines.size() << " passwords read and shuffled." << std::endl;
-	std::cout << ThreadCount << " threads" << std::endl;
-
-    cURLpp::initialize();
-
+	std::cout << "Starting " << ThreadCount << " threads" << std::endl;
 	auto start = std::chrono::system_clock::now();
 
+	cURLpp::initialize();
 	std::vector<std::thread> pool(ThreadCount);
-	for(int i =0; i < ThreadCount; i++)
+	for (int i = 0; i < ThreadCount; i++)
 	{
 		pool.at(i) = std::thread(thread_function);
 		pool.at(i).detach();
@@ -103,32 +165,21 @@ int main(int argc, char* argv[])
 
 	sleep(1);
 	int previousRequests = 0;
-	while(!lines.empty()){
-		int requestsPerSecond =  RequestsMade - previousRequests;
-		double secondsRemaining =  (lines.size()-RequestsMade) / requestsPerSecond;
+	while (!payloads.empty())
+	{
+		int requestsPerSecond = RequestsMade - previousRequests;
+		double secondsRemaining = (payloads.size() - RequestsMade) / requestsPerSecond;
+		std::string eta = buildTime(secondsRemaining);
 
-		int hours = floor((secondsRemaining/60)/60);
-		int minutes = (int)(floor(secondsRemaining / 60)) % 60;
-		int seconds = (int)secondsRemaining % 60; 
-
-		std::string eta = "";
-		if(hours < 10) eta.append("0");
-		eta.append(std::to_string(hours));
-		eta.append(":");
-		if(minutes < 10) eta.append("0");
-		eta.append(std::to_string(minutes));
-		eta.append(":");
-		if(seconds < 10) eta.append("0");
-		eta.append(std::to_string(seconds));
-
-		std::cout << "Requests p/s " << requestsPerSecond << "s" << " | " << RequestsMade << "/" << lines.size() << "| ETA: " << eta << "\r";
+		std::cout << "Requests p/s " << requestsPerSecond << "s"
+				  << " | " << RequestsMade << "/" << payloads.size() << "| ETA: " << eta << "\r";
 		std::cout.flush();
 		previousRequests = RequestsMade;
 		sleep(1);
 	}
 
 	auto end = std::chrono::system_clock::now();
-	std::chrono::duration<double> elapsed_seconds = end-start;
+	std::chrono::duration<double> elapsed_seconds = end - start;
 	std::cout << RequestsMade << " requests made in " << elapsed_seconds.count() << "s" << std::endl;
 
 	cURLpp::terminate();
